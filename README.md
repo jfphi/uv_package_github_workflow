@@ -1,0 +1,2 @@
+# uv_package_github_workflow
+將uv專案的main.py相關依賴自動打包成onefile並放到release的github workflow
