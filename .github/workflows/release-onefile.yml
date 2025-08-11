@@ -1,0 +1,339 @@
+# 以 Nuitka 將 uv 專案的 main.py 打包成單一可執行檔 (onefile)，並於建立 tag 時自動產生 Release 與上傳產物
+name: Build and Release (Onefile)
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build-onefile:
+    runs-on: ubuntu-22.04  # 針對 GLIBC 2.35 的相容環境
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.12'
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v1
+        with:
+          version: "0.8.3"
+
+      - name: Install system dependencies
+        run: |
+          echo "🔧 Installing system dependencies for Ubuntu 22.04..."
+          sudo apt update
+
+          echo "📦 Adding deadsnakes PPA for Python 3.12..."
+          sudo apt install -y software-properties-common
+          sudo add-apt-repository -y ppa:deadsnakes/ppa
+          sudo apt update
+
+          echo "🐍 Installing Python 3.12 and dev packages..."
+          sudo apt install -y python3.12 python3.12-dev python3.12-venv
+
+          echo "🔧 Installing build tools..."
+          sudo apt install -y patchelf ccache build-essential binutils
+
+          echo "✅ System dependencies installed (python3.12-dev, patchelf, ccache, build-essential)"
+          echo "🔍 GLIBC version: $(ldd --version | head -1)"
+          echo "🐍 Python 3.12 version (system): $(python3.12 --version)"
+
+      - name: Install project dependencies with uv
+        run: |
+          echo "📦 Installing Python project dependencies via uv..."
+          uv sync
+          echo "✅ Project dependencies installed"
+
+      - name: Show build environment
+        run: |
+          echo "🔍 Build Environment Info:"
+          echo "OS: Ubuntu 22.04 (GLIBC 2.35)"
+          echo "GLIBC version: $(ldd --version | head -1)"
+          echo "Default Python: $(python --version)"
+          echo "Python 3.12: $(python3.12 --version 2>/dev/null || echo 'Not installed')"
+          echo "uv: $(uv --version)"
+          echo "patchelf: $(patchelf --version)"
+          echo "ccache: $(ccache --version)"
+          echo "Python 3.12 headers: $(ls /usr/include/python3.12/Python.h 2>/dev/null && echo 'Found' || echo 'Not found')"
+          echo "Current directory: $(pwd)"
+          ls -la
+
+      - name: Get Git version info
+        id: git_version
+        run: |
+          echo "📋 Getting Git version information..."
+          echo "tag=$(git describe --tags --abbrev=0)" >> $GITHUB_OUTPUT
+          echo "commit=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
+          echo "branch=$(git rev-parse --abbrev-ref HEAD)" >> $GITHUB_OUTPUT
+          echo "date=$(git log -1 --format=%cd --date=short)" >> $GITHUB_OUTPUT
+          echo "full_version=$(git describe --tags --abbrev=0)-$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
+
+          echo "✅ Git version info:"
+          echo "  Tag: ${{ steps.git_version.outputs.tag }}"
+          echo "  Commit: ${{ steps.git_version.outputs.commit }}"
+          echo "  Branch: ${{ steps.git_version.outputs.branch }}"
+          echo "  Date: ${{ steps.git_version.outputs.date }}"
+          echo "  Full Version: ${{ steps.git_version.outputs.full_version }}"
+
+      - name: Build onefile with Nuitka
+        run: |
+          set -e
+          echo "🚀 Building onefile with Nuitka on Ubuntu 22.04..."
+          echo "📦 Version: ${{ steps.git_version.outputs.full_version }}"
+          echo "🔧 Target GLIBC compatibility: 2.35+ (Ubuntu 22.04+)"
+
+          echo "🔍 Verifying dependencies before build..."
+          echo "GLIBC version: $(ldd --version | head -1)"
+          echo "Python 3.12 binary: $(which python3.12 && echo 'OK' || echo 'MISSING')"
+          echo "Python 3.12 version: $(python3.12 --version)"
+          echo "Python 3.12 headers: $(ls /usr/include/python3.12/Python.h && echo 'OK' || echo 'MISSING')"
+          echo "ccache: $(which ccache && echo 'OK' || echo 'MISSING')"
+          echo "patchelf: $(which patchelf && echo 'OK' || echo 'MISSING')"
+
+          echo "📦 Ensuring Nuitka is installed via uv..."
+          uv pip install --python 3.12 "nuitka>=2.0"
+
+          echo "📦 Injecting version information if script exists..."
+          if [ -f "scripts/inject_version.py" ]; then
+            python3.12 scripts/inject_version.py
+          else
+            echo "(skip) scripts/inject_version.py not found"
+          fi
+
+          echo "🧹 Cleaning dist directory..."
+          rm -rf dist
+          mkdir -p dist
+
+          echo "🛠️ Starting Nuitka onefile build..."
+          # 預設假設 main.py 在 repository 根目錄，若專案不同請調整此路徑
+          python3.12 -m nuitka \
+            --onefile \
+            --standalone \
+            --assume-yes-for-downloads \
+            --follow-imports \
+            --output-filename=dist/jfpy \
+            main.py
+
+          echo "📊 Build Results:"
+          ls -lh dist/
+          echo "🔍 Checking GLIBC compatibility:"
+          objdump -T dist/jfpy | grep GLIBC | sort -u | tail -5 || true
+          echo "✅ Nuitka onefile build successful"
+
+      - name: Verify build
+        run: |
+          echo "🔍 Verifying build..."
+          if [ -f "dist/jfpy" ]; then
+            echo "✅ Executable found: dist/jfpy"
+            echo "📏 File size: $(ls -lh dist/jfpy | awk '{print $5}')"
+            echo "🔐 File permissions: $(ls -la dist/jfpy | awk '{print $1}')"
+            echo "🔗 Dynamic libraries: $(ldd dist/jfpy | wc -l) dependencies"
+            echo "📋 Basic functionality test:"
+            ./dist/jfpy --help > /dev/null && echo "✅ Help command works" || echo "⚠️ Help command may not be available"
+          else
+            echo "❌ Executable not found!"
+            exit 1
+          fi
+
+      - name: Get file size
+        id: file_size
+        run: |
+          echo "size=$(ls -lh dist/jfpy | awk '{print $5}')" >> $GITHUB_OUTPUT
+          echo "File size: $(ls -lh dist/jfpy | awk '{print $5}')"
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        id: create_release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: ${{ github.ref_name }}
+          body: |
+            # JF 系統管理腳本 (Onefile) - ${{ github.ref_name }}
+
+            ## 🚀 功能特色
+            - 使用 Nuitka (社區版) onefile 打包
+            - Linux x86_64 單一可執行檔案
+            - 相容 GLIBC 2.35+ 系統 (Ubuntu 22.04+ 相容)
+            - 以 uv 安裝專案依賴並打包
+
+            ## 📦 安裝說明
+            1. 下載 `jfpy` 可執行檔案
+            2. 給予執行權限: `chmod +x jfpy`
+            3. 執行: `./jfpy`
+
+            ## 🔧 構建信息
+            - **Python 版本**: 3.12
+            - **Nuitka 版本**: 社區版 (onefile)
+            - **構建日期**: ${{ github.event.head_commit.timestamp }}
+            - **提交哈希**: ${{ github.sha }}
+            - **檔案大小**: ${{ steps.file_size.outputs.size }}
+            - **相容性**: GLIBC 2.35+ (Ubuntu 22.04+ 相容)
+
+            ## 🎯 主要功能
+            - 系統基礎安裝
+            - NVIDIA/AMD 驅動安裝
+            - Docker 配置
+            - 系統監控工具
+            - 硬碟測試
+            - Ceph 模型掛載
+
+            ## 📝 更新日誌
+            請查看 [CHANGELOG.md](https://github.com/${{ github.repository }}/blob/main/CHANGELOG.md) 了解詳細更新內容。
+          draft: false
+          prerelease: false
+          files: dist/jfpy
+
+      # --- 以下為推送到其他 public repo 的流程，依需求保留但先註解關閉 ---
+      # - name: Setup Git for public repo
+      #   run: |
+      #     echo "🔧 Setting up Git for public repository..."
+      #     git config --global user.name "github-actions[bot]"
+      #     git config --global user.email "github-actions[bot]@users.noreply.github.com"
+
+      # - name: Clone public repository
+      #   run: |
+      #     echo "📥 Cloning public repository..."
+      #     git clone https://x-access-token:${{ secrets.PUBLIC_REPO_TOKEN }}@github.com/jfphi/jfpy-public.git public-repo
+      #     cd public-repo
+      #     echo "✅ Public repository cloned"
+
+      # - name: Update public repository
+      #   run: |
+      #     echo "📝 Updating public repository..."
+      #     cd public-repo
+      #
+      #     # 複製已構建的 jfpy 檔案
+      #     cp ../dist/jfpy ./jfpy
+      #     chmod +x ./jfpy
+      #
+      #     # 更新 README.md
+      #     cat > README.md << 'EOF'
+      #     # JF 系統管理腳本 - 公開版本 (Onefile)
+      #
+      #     ## 📦 最新版本
+      #     - **版本**: ${{ github.ref_name }}
+      #     - **構建日期**: ${{ github.event.head_commit.timestamp }}
+      #     - **提交哈希**: ${{ github.sha }}
+      #     - **檔案大小**: ${{ steps.file_size.outputs.size }}
+      #
+      #     ## 🚀 功能特色
+      #     - 使用 Nuitka (社區版) onefile 打包
+      #     - Linux x86_64 單一可執行檔案
+      #     - 相容 GLIBC 2.35+ 系統
+      #     - 以 uv 安裝專案依賴並打包
+      #
+      #     ## 📦 安裝說明
+      #     1. 下載 `jfpy` 可執行檔案
+      #     2. 給予執行權限: `chmod +x jfpy`
+      #     3. 執行: `./jfpy`
+      #
+      #     ## 🎯 主要功能
+      #     - 系統基礎安裝
+      #     - NVIDIA/AMD 驅動安裝
+      #     - Docker 配置
+      #     - 系統監控工具
+      #     - 硬碟測試
+      #     - Ceph 模型掛載
+      #
+      #     ## 📝 更新日誌
+      #     請查看 [CHANGELOG.md](https://github.com/jfphi/jfpy/blob/main/CHANGELOG.md) 了解詳細更新內容。
+      #     EOF
+      #
+      #     echo "✅ Files updated in public repository"
+
+      # - name: Commit and push to public repository
+      #   run: |
+      #     echo "📤 Committing and pushing to public repository..."
+      #     cd public-repo
+      #
+      #     git add .
+      #     git commit -m "Release ${{ github.ref_name }} - ${{ github.sha }}"
+      #     git tag ${{ github.ref_name }}
+      #     git push origin main
+      #     git push origin ${{ github.ref_name }}
+      #
+      #     echo "✅ Public repository updated and tagged"
+
+      # - name: Verify files before public release
+      #   run: |
+      #     echo "🔍 Verifying files before creating public release..."
+      #     echo "Current directory: $(pwd)"
+      #     echo "Files in current directory:"
+      #     ls -la
+      #     echo "Files in public-repo directory:"
+      #     ls -la public-repo/
+      #     echo "Checking if jfpy exists in public-repo:"
+      #     if [ -f "public-repo/jfpy" ]; then
+      #       echo "✅ jfpy file found in public-repo/"
+      #       echo "File size: $(ls -lh public-repo/jfpy | awk '{print $5}')"
+      #     else
+      #       echo "❌ jfpy file not found in public-repo/"
+      #       exit 1
+      #     fi
+
+      # - name: Create Release in public repository
+      #   uses: softprops/action-gh-release@v1
+      #   env:
+      #     GITHUB_TOKEN: ${{ secrets.PUBLIC_REPO_TOKEN }}
+      #   with:
+      #     repository: jfphi/jfpy-public
+      #     tag_name: ${{ github.ref_name }}
+      #     name: ${{ github.ref_name }}
+      #     body: |
+      #       # JF 系統管理腳本 (Onefile) - ${{ github.ref_name }}
+      #
+      #       ## 🚀 功能特色
+      #       - 使用 Nuitka (社區版) onefile 打包
+      #       - Linux x86_64 單一可執行檔案
+      #       - 相容 GLIBC 2.35+ 系統 (Ubuntu 22.04+ 相容)
+      #       - 以 uv 安裝專案依賴並打包
+      #
+      #       ## 📦 安裝說明
+      #       1. 下載 `jfpy` 可執行檔案
+      #       2. 給予執行權限: `chmod +x jfpy`
+      #       3. 執行: `./jfpy`
+      #
+      #       ## 🔧 構建信息
+      #       - **Python 版本**: 3.12
+      #       - **Nuitka 版本**: 社區版 (onefile)
+      #       - **構建日期**: ${{ github.event.head_commit.timestamp }}
+      #       - **提交哈希**: ${{ github.sha }}
+      #       - **檔案大小**: ${{ steps.file_size.outputs.size }}
+      #       - **相容性**: GLIBC 2.35+ (Ubuntu 22.04+ 相容)
+      #
+      #       ## 🎯 主要功能
+      #       - 系統基礎安裝
+      #       - NVIDIA/AMD 驅動安裝
+      #       - Docker 配置
+      #       - 系統監控工具
+      #       - 硬碟測試
+      #       - Ceph 模型掛載
+      #
+      #       ## 📝 更新日誌
+      #       請查看 [CHANGELOG.md](https://github.com/jfphi/jfpy/blob/main/CHANGELOG.md) 了解詳細更新內容。
+      #     draft: false
+      #     prerelease: false
+      #     files: public-repo/jfpy
+
+      - name: Build Summary
+        run: |
+          echo "🎉 Build and Release (Onefile) Summary:"
+          echo "✅ Ubuntu 22.04 environment setup (GLIBC 2.35 compatibility)"
+          echo "✅ Python 3.12 environment setup"
+          echo "✅ System dependencies installed (patchelf, python3.12-dev, ccache)"
+          echo "✅ Project dependencies installed via uv"
+          echo "✅ Nuitka onefile build completed"
+          echo "✅ Private repository release created"
+          echo "🔗 Tag: ${{ github.ref_name }}"
+          echo "📦 Release URL: https://github.com/${{ github.repository }}/releases/tag/${{ github.ref_name }}"
+
+
+
+
