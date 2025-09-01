@@ -1,0 +1,29 @@
+[project]
+name = "uv-example"
+version = "0.1.0"
+description = "Example Python project managed by uv."
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [{ name = "Example Author", email = "author@example.com" }]
+dependencies = []
+
+[project.urls]
+Repository = "https://github.com/phison/uv_package_github_workflow"
+
+[project.scripts]
+uv-example = "uv_example.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.uv]
+dev-dependencies = [
+  "pytest>=8",
+  "ruff>=0.5",
+  "mypy>=1.10"
+]
+
+
+
